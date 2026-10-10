@@ -15,10 +15,16 @@ return [
     ],
 
     'discounts' => [
+        'HAPPY20' => [
+            'type' => 'percent_before_tax',
+            'rate' => '0.20',
+            'minimum_subtotal' => '0',
+            'categories' => ['beverage'],
+        ],
         'TABLE500' => [
             'type' => 'fixed_before_tax',
             'amount' => '500',
-            'minimum_subtotal' => '0',
+            'minimum_subtotal' => '5000',
             'categories' => ['food', 'beverage', 'alcohol'],
         ],
     ],
@@ -29,7 +35,7 @@ return [
             'first' => 20,
         ],
         'default_rank' => 10,
-        'policy' => 'Cook higher priority first (VIP, then first, then normal). When priority matches, cook the earlier ticket, then the shorter preparation, then the lower ticket id. The request now is the clock for waiting time and is not a sort key.',
+        'policy' => 'One cook works one ticket at a time. The clock starts at now and moves forward by that ticket\'s prep time. At each pick, only tickets already created are waiting. Higher priority is cooked first (VIP, then first, then normal). Ties use earlier creation, then shorter prep, then ticket id.',
     ],
 
 ];

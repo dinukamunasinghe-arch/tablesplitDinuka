@@ -8,19 +8,37 @@ class KitchenQueueService
 {
     public function schedule(array $input): array
     {
-        $now = Decimal::of($input['now']);
+        $clock = Decimal::of($input['now']);
         $pending = [];
 
         foreach ($input['tickets'] as $ticket) {
-            $pending[] = $this->normalize($ticket, $now);
+            $pending[] = $this->normalize($ticket);
         }
 
         $selections = [];
         $step = 1;
 
         while ($pending !== []) {
-            usort($pending, fn (array $left, array $right): int => $this->compare($left, $right));
-            $chosen = array_shift($pending);
+            $waiting = $this->waitingAt($pending, $clock);
+            $waited = false;
+
+            if ($waiting === []) {
+                $clock = $this->earliestCreated($pending);
+                $waiting = $this->waitingAt($pending, $clock);
+                $waited = true;
+            }
+
+            usort($waiting, fn (array $left, array $right): int => $this->compare($left, $right));
+            $chosen = $waiting[0];
+            $pending = array_values(array_filter(
+                $pending,
+                fn (array $ticket): bool => $ticket['id'] !== $chosen['id'],
+            ));
+            $stillWaiting = array_values(array_filter(
+                $waiting,
+                fn (array $ticket): bool => $ticket['id'] !== $chosen['id'],
+            ));
+
             $selections[] = [
                 'step' => $step,
                 'id' => $chosen['id'],
@@ -28,17 +46,20 @@ class KitchenQueueService
                 'priority' => $chosen['priority'],
                 'created' => $chosen['created_number'],
                 'prep' => $chosen['prep_number'],
-                'waiting' => $chosen['waiting_number'],
-                'reason' => $this->reason($chosen, $pending),
+                'started' => $this->number($clock),
+                'waiting' => $this->number(Decimal::sub($clock, $chosen['created'])),
+                'reason' => $this->reason($chosen, $stillWaiting, $clock, $waited),
                 'remaining' => array_column($pending, 'id'),
             ];
+
+            $clock = Decimal::add($clock, $chosen['prep']);
             $step++;
         }
 
         $next = $selections[0];
 
         return [
-            'now' => $this->number($now),
+            'now' => $this->number(Decimal::of($input['now'])),
             'policy' => config('tablesplit.kitchen.policy'),
             'next' => $this->summary($next),
             'remaining' => array_map(fn (array $selection): array => $this->summary($selection), array_slice($selections, 1)),
@@ -47,12 +68,11 @@ class KitchenQueueService
         ];
     }
 
-    private function normalize(array $ticket, string $now): array
+    private function normalize(array $ticket): array
     {
         $priority = $ticket['priority'] ?? null;
         $created = Decimal::of($ticket['created']);
         $prep = Decimal::of($ticket['prep']);
-        $waiting = Decimal::sub($now, $created);
 
         return [
             'id' => (string) $ticket['id'],
@@ -61,11 +81,30 @@ class KitchenQueueService
             'rank' => $this->rank($priority),
             'created' => $created,
             'prep' => $prep,
-            'waiting' => $waiting,
             'created_number' => $this->number($created),
             'prep_number' => $this->number($prep),
-            'waiting_number' => $this->number($waiting),
         ];
+    }
+
+    private function waitingAt(array $pending, string $clock): array
+    {
+        return array_values(array_filter(
+            $pending,
+            fn (array $ticket): bool => Decimal::cmp($ticket['created'], $clock) <= 0,
+        ));
+    }
+
+    private function earliestCreated(array $pending): string
+    {
+        $earliest = $pending[0]['created'];
+
+        foreach ($pending as $ticket) {
+            if (Decimal::cmp($ticket['created'], $earliest) < 0) {
+                $earliest = $ticket['created'];
+            }
+        }
+
+        return $earliest;
     }
 
     private function rank(?string $priority): int
@@ -98,10 +137,22 @@ class KitchenQueueService
         return strcmp($left['id'], $right['id']);
     }
 
-    private function reason(array $chosen, array $others): string
+    private function reason(array $chosen, array $others, string $clock, bool $waited): string
+    {
+        $minute = $this->number($clock);
+        $choice = $this->choiceReason($chosen, $others);
+
+        if ($waited) {
+            return "No ticket was waiting yet, so the cook waited until minute {$minute}. {$choice}";
+        }
+
+        return "At minute {$minute}, {$choice}";
+    }
+
+    private function choiceReason(array $chosen, array $others): string
     {
         if ($others === []) {
-            return 'Only ticket left in the queue.';
+            return 'only this ticket was waiting.';
         }
 
         $sameRank = array_values(array_filter(
@@ -115,21 +166,21 @@ class KitchenQueueService
                 $others,
             );
 
-            return 'Higher priority ('.$this->label($chosen).') than '.implode(' and ', $behind).'.';
+            return 'higher priority ('.$this->label($chosen).') than '.implode(' and ', $behind).'.';
         }
 
         $ids = implode(', ', array_column($sameRank, 'id'));
         $label = $this->label($chosen);
 
         if ($this->isStrictlyEarlier($chosen, $sameRank)) {
-            return "Same {$label} priority as {$ids}; created earlier.";
+            return "same {$label} priority as {$ids}; created earlier.";
         }
 
         if ($this->isStrictlyShorter($chosen, $sameRank)) {
-            return "Same {$label} priority as {$ids}; shorter preparation time.";
+            return "same {$label} priority as {$ids}; shorter preparation time.";
         }
 
-        return "Same {$label} priority as {$ids}; ticket id comes first.";
+        return "same {$label} priority as {$ids}; ticket id comes first.";
     }
 
     private function isStrictlyEarlier(array $chosen, array $sameRank): bool
@@ -187,6 +238,7 @@ class KitchenQueueService
             'priority' => $selection['priority'],
             'created' => $selection['created'],
             'prep' => $selection['prep'],
+            'started' => $selection['started'],
             'waiting' => $selection['waiting'],
             'reason' => $selection['reason'],
         ];

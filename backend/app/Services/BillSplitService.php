@@ -12,8 +12,19 @@ class BillSplitService
     public function split(array $input): array
     {
         $seatIds = $this->seatIds($input['seats']);
-        $lines = $this->lines($input['items']);
-        $subtotal = $this->sum($lines, 'gross');
+        $gross = $this->emptyBuckets($seatIds);
+
+        foreach ($input['items'] as $item) {
+            $lineTotal = Decimal::mul($item['unit_price'], $item['quantity']);
+            $shares = $this->splitAmount($lineTotal, $item['shared_by']);
+
+            foreach ($shares as $seatId => $share) {
+                $gross[$seatId][$item['category']] = Decimal::add($gross[$seatId][$item['category']], $share);
+            }
+        }
+
+        $categoryTotals = $this->categoryTotals($gross);
+        $subtotal = $this->sumValues($categoryTotals);
 
         if (Decimal::cmp($subtotal, '0') <= 0) {
             throw ValidationException::withMessages([
@@ -21,31 +32,22 @@ class BillSplitService
             ]);
         }
 
-        $discount = $this->discounts->resolve($input['code'] ?? null, $subtotal, $lines);
-        $lines = $this->applyDiscount($lines, $discount['amount'], $discount['categories']);
+        $rule = $this->discounts->resolve($input['code'] ?? null, $categoryTotals);
+        $discount = $this->discountBySeat($gross, $rule);
+        $seats = [];
 
-        $net = $this->sum($lines, 'net');
-        $service = Decimal::mul($this->serviceBase($lines), $this->rate('service_charge_rate'));
-        $vat = Decimal::mul(Decimal::add($net, $service), $this->rate('vat_rate'));
-        $exactTotal = Decimal::add($net, Decimal::add($service, $vat));
+        foreach ($seatIds as $seatId) {
+            $seats[$seatId] = $this->priceSeat($gross[$seatId], $discount[$seatId]);
+        }
 
-        $bill = [
-            'subtotal' => $subtotal,
-            'discount' => $discount['amount'],
-            'service_charge' => $service,
-            'vat' => $vat,
-            'exact_total' => $exactTotal,
-        ];
-
-        $seats = $this->seatTotals($seatIds, $lines);
-        $this->alignSeatsToBill($seats, $bill);
+        $bill = $this->sumSeats($seats, $subtotal, $rule['code']);
         $payable = $this->allocatePayable($seats, $bill['exact_total']);
 
         return [
             'seats' => $this->presentSeats($seats, $payable['seats']),
             'bill' => [
                 'subtotal' => Decimal::format($bill['subtotal']),
-                'discount_code' => $discount['code'],
+                'discount_code' => $bill['discount_code'],
                 'discount' => Decimal::format($bill['discount']),
                 'service_charge' => Decimal::format($bill['service_charge']),
                 'vat' => Decimal::format($bill['vat']),
@@ -64,151 +66,30 @@ class BillSplitService
         return $ids;
     }
 
-    private function lines(array $items): array
+    private function categories(): array
     {
-        $lines = [];
-
-        foreach ($items as $item) {
-            $sharedBy = array_map('intval', $item['shared_by']);
-            sort($sharedBy);
-
-            $lines[] = [
-                'category' => $item['category'],
-                'gross' => Decimal::mul($item['unit_price'], $item['quantity']),
-                'net' => '0',
-                'discount' => '0',
-                'shared_by' => $sharedBy,
-            ];
-        }
-
-        return $lines;
+        return array_keys(config('tablesplit.categories'));
     }
 
-    private function applyDiscount(array $lines, string $amount, array $categories): array
+    private function emptyBuckets(array $seatIds): array
     {
-        foreach ($lines as $index => $line) {
-            $lines[$index]['discount'] = Decimal::of('0');
-            $lines[$index]['net'] = $line['gross'];
+        $buckets = [];
+        $zero = [];
+
+        foreach ($this->categories() as $category) {
+            $zero[$category] = Decimal::of('0');
         }
-
-        if (Decimal::isZero($amount)) {
-            return $lines;
-        }
-
-        $eligibleIndexes = [];
-        $eligibleTotal = Decimal::of('0');
-
-        foreach ($lines as $index => $line) {
-            if (in_array($line['category'], $categories, true)) {
-                $eligibleIndexes[] = $index;
-                $eligibleTotal = Decimal::add($eligibleTotal, $line['gross']);
-            }
-        }
-
-        $remaining = $amount;
-        $lastIndex = $eligibleIndexes[array_key_last($eligibleIndexes)];
-
-        foreach ($eligibleIndexes as $index) {
-            if ($index === $lastIndex) {
-                $share = $remaining;
-            } else {
-                $share = Decimal::div(Decimal::mul($amount, $lines[$index]['gross']), $eligibleTotal);
-                $remaining = Decimal::sub($remaining, $share);
-            }
-
-            $lines[$index]['discount'] = $share;
-            $lines[$index]['net'] = Decimal::sub($lines[$index]['gross'], $share);
-        }
-
-        return $lines;
-    }
-
-    private function serviceBase(array $lines): string
-    {
-        $base = Decimal::of('0');
-
-        foreach ($lines as $line) {
-            if ($this->serviceApplies($line['category'])) {
-                $base = Decimal::add($base, $line['net']);
-            }
-        }
-
-        return $base;
-    }
-
-    private function serviceApplies(string $category): bool
-    {
-        return (bool) config("tablesplit.categories.{$category}.service_charge");
-    }
-
-    private function rate(string $key): string
-    {
-        return Decimal::of(config("tablesplit.{$key}"));
-    }
-
-    private function sum(array $lines, string $field): string
-    {
-        $total = Decimal::of('0');
-
-        foreach ($lines as $line) {
-            $total = Decimal::add($total, $line[$field]);
-        }
-
-        return $total;
-    }
-
-    private function seatTotals(array $seatIds, array $lines): array
-    {
-        $seats = [];
 
         foreach ($seatIds as $seatId) {
-            $seats[$seatId] = [
-                'subtotal' => Decimal::of('0'),
-                'discount' => Decimal::of('0'),
-                'net' => Decimal::of('0'),
-                'service_base' => Decimal::of('0'),
-                'service_charge' => Decimal::of('0'),
-                'vat' => Decimal::of('0'),
-                'exact_total' => Decimal::of('0'),
-            ];
+            $buckets[$seatId] = $zero;
         }
 
-        foreach ($lines as $line) {
-            $grossShares = $this->splitAmount($line['gross'], $line['shared_by']);
-            $netShares = $this->splitAmount($line['net'], $line['shared_by']);
-            $discountShares = $this->splitAmount($line['discount'], $line['shared_by']);
-
-            foreach ($grossShares as $seatId => $gross) {
-                $seats[$seatId]['subtotal'] = Decimal::add($seats[$seatId]['subtotal'], $gross);
-                $seats[$seatId]['net'] = Decimal::add($seats[$seatId]['net'], $netShares[$seatId]);
-                $seats[$seatId]['discount'] = Decimal::add($seats[$seatId]['discount'], $discountShares[$seatId]);
-
-                if ($this->serviceApplies($line['category'])) {
-                    $seats[$seatId]['service_base'] = Decimal::add(
-                        $seats[$seatId]['service_base'],
-                        $netShares[$seatId],
-                    );
-                }
-            }
-        }
-
-        $serviceRate = $this->rate('service_charge_rate');
-        $vatRate = $this->rate('vat_rate');
-
-        foreach ($seats as $seatId => $seat) {
-            $service = Decimal::mul($seat['service_base'], $serviceRate);
-            $vat = Decimal::mul(Decimal::add($seat['net'], $service), $vatRate);
-            $seats[$seatId]['service_charge'] = $service;
-            $seats[$seatId]['vat'] = $vat;
-            $seats[$seatId]['exact_total'] = Decimal::add($seat['net'], Decimal::add($service, $vat));
-        }
-
-        return $seats;
+        return $buckets;
     }
 
     private function splitAmount(string $amount, array $seatIds): array
     {
-        $seatIds = array_values(array_unique($seatIds));
+        $seatIds = array_values(array_unique(array_map('intval', $seatIds)));
         sort($seatIds);
         $seatCount = count($seatIds);
         $evenShare = Decimal::div($amount, (string) $seatCount);
@@ -229,47 +110,154 @@ class BillSplitService
         return $shares;
     }
 
-    private function alignSeatsToBill(array &$seats, array $bill): void
+    private function categoryTotals(array $gross): array
     {
-        $ids = array_keys($seats);
-        sort($ids);
-        $lastSeatId = $ids[array_key_last($ids)];
+        $totals = [];
 
-        foreach (['discount', 'service_charge', 'vat'] as $field) {
-            $others = Decimal::of('0');
+        foreach ($this->categories() as $category) {
+            $totals[$category] = Decimal::of('0');
+        }
 
-            foreach ($ids as $id) {
-                if ($id === $lastSeatId) {
-                    continue;
+        foreach ($gross as $bucket) {
+            foreach ($bucket as $category => $amount) {
+                $totals[$category] = Decimal::add($totals[$category], $amount);
+            }
+        }
+
+        return $totals;
+    }
+
+    private function discountBySeat(array $gross, array $rule): array
+    {
+        $discount = $this->emptyBuckets(array_keys($gross));
+
+        if ($rule['type'] === 'percent_before_tax') {
+            foreach ($discount as $seatId => $bucket) {
+                foreach ($rule['categories'] as $category) {
+                    $discount[$seatId][$category] = Decimal::mul($gross[$seatId][$category], $rule['rate']);
                 }
-
-                $others = Decimal::add($others, $seats[$id][$field]);
             }
 
-            $seats[$lastSeatId][$field] = Decimal::sub($bill[$field], $others);
+            return $discount;
         }
 
-        $seats[$lastSeatId]['net'] = Decimal::sub(
-            $seats[$lastSeatId]['subtotal'],
-            $seats[$lastSeatId]['discount'],
-        );
-
-        foreach ($ids as $id) {
-            $seats[$id]['exact_total'] = Decimal::add(
-                $seats[$id]['net'],
-                Decimal::add($seats[$id]['service_charge'], $seats[$id]['vat']),
-            );
+        if ($rule['type'] !== 'fixed_before_tax' || Decimal::isZero($rule['amount'])) {
+            return $discount;
         }
 
-        $exactSum = Decimal::of('0');
+        $seatTotals = [];
 
-        foreach ($ids as $id) {
-            $exactSum = Decimal::add($exactSum, $seats[$id]['exact_total']);
+        foreach ($gross as $seatId => $bucket) {
+            $seatTotals[$seatId] = $this->sumValues($bucket);
         }
 
-        $drift = Decimal::sub($bill['exact_total'], $exactSum);
-        $seats[$lastSeatId]['vat'] = Decimal::add($seats[$lastSeatId]['vat'], $drift);
-        $seats[$lastSeatId]['exact_total'] = Decimal::add($seats[$lastSeatId]['exact_total'], $drift);
+        $seatShares = $this->shareByWeight($rule['amount'], $seatTotals);
+
+        foreach ($seatShares as $seatId => $seatDiscount) {
+            $weights = [];
+
+            foreach ($rule['categories'] as $category) {
+                $weights[$category] = $gross[$seatId][$category];
+            }
+
+            $parts = $this->shareByWeight($seatDiscount, $weights);
+
+            foreach ($parts as $category => $part) {
+                $discount[$seatId][$category] = $part;
+            }
+        }
+
+        return $discount;
+    }
+
+    private function shareByWeight(string $amount, array $weights): array
+    {
+        $shares = [];
+
+        foreach ($weights as $key => $weight) {
+            $shares[$key] = Decimal::of('0');
+        }
+
+        if (Decimal::isZero($amount)) {
+            return $shares;
+        }
+
+        $keys = [];
+        $total = Decimal::of('0');
+
+        foreach ($weights as $key => $weight) {
+            if (Decimal::cmp($weight, '0') > 0) {
+                $keys[] = $key;
+                $total = Decimal::add($total, $weight);
+            }
+        }
+
+        if ($keys === []) {
+            return $shares;
+        }
+
+        $last = $keys[array_key_last($keys)];
+        $remaining = $amount;
+
+        foreach ($keys as $key) {
+            if ($key === $last) {
+                $shares[$key] = $remaining;
+
+                continue;
+            }
+
+            $share = Decimal::div(Decimal::mul($amount, $weights[$key]), $total);
+            $shares[$key] = $share;
+            $remaining = Decimal::sub($remaining, $share);
+        }
+
+        return $shares;
+    }
+
+    private function priceSeat(array $gross, array $discount): array
+    {
+        $subtotal = $this->sumValues($gross);
+        $discountTotal = $this->sumValues($discount);
+        $net = Decimal::sub($subtotal, $discountTotal);
+        $serviceBase = Decimal::of('0');
+
+        foreach ($gross as $category => $amount) {
+            if (config("tablesplit.categories.{$category}.service_charge")) {
+                $serviceBase = Decimal::add($serviceBase, Decimal::sub($amount, $discount[$category]));
+            }
+        }
+
+        $service = Decimal::mul($serviceBase, $this->rate('service_charge_rate'));
+        $vat = Decimal::mul(Decimal::add($net, $service), $this->rate('vat_rate'));
+
+        return [
+            'subtotal' => $subtotal,
+            'discount' => $discountTotal,
+            'service_charge' => $service,
+            'vat' => $vat,
+            'exact_total' => Decimal::add($net, Decimal::add($service, $vat)),
+        ];
+    }
+
+    private function sumSeats(array $seats, string $subtotal, ?string $code): array
+    {
+        $bill = [
+            'subtotal' => $subtotal,
+            'discount_code' => $code,
+            'discount' => Decimal::of('0'),
+            'service_charge' => Decimal::of('0'),
+            'vat' => Decimal::of('0'),
+            'exact_total' => Decimal::of('0'),
+        ];
+
+        foreach ($seats as $seat) {
+            $bill['discount'] = Decimal::add($bill['discount'], $seat['discount']);
+            $bill['service_charge'] = Decimal::add($bill['service_charge'], $seat['service_charge']);
+            $bill['vat'] = Decimal::add($bill['vat'], $seat['vat']);
+            $bill['exact_total'] = Decimal::add($bill['exact_total'], $seat['exact_total']);
+        }
+
+        return $bill;
     }
 
     private function allocatePayable(array $seats, string $billExact): array
@@ -278,7 +266,6 @@ class BillSplitService
         $billTotal = Decimal::roundHalfUp($billExact, $places);
         $factor = bcpow('10', (string) $places, 0);
         $targetUnits = bcmul($billTotal, $factor, 0);
-
         $rows = [];
 
         foreach ($seats as $seatId => $seat) {
@@ -355,5 +342,21 @@ class BillSplitService
         }
 
         return $rows;
+    }
+
+    private function sumValues(array $values): string
+    {
+        $total = Decimal::of('0');
+
+        foreach ($values as $value) {
+            $total = Decimal::add($total, $value);
+        }
+
+        return $total;
+    }
+
+    private function rate(string $key): string
+    {
+        return Decimal::of(config("tablesplit.{$key}"));
     }
 }

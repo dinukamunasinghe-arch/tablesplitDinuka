@@ -164,7 +164,70 @@ class BillSplitServiceTest extends TestCase
         $this->assertSame($plain['bill']['total'], $discounted['bill']['total']);
     }
 
-    public function test_table500_is_rejected_when_it_exceeds_the_subtotal(): void
+    public function test_happy20_discounts_beverage_only(): void
+    {
+        $result = app(BillSplitService::class)->split([
+            'seats' => [1],
+            'items' => [
+                [
+                    'name' => 'Rice',
+                    'unit_price' => 1000,
+                    'quantity' => 1,
+                    'category' => 'food',
+                    'shared_by' => [1],
+                ],
+                [
+                    'name' => 'Tea',
+                    'unit_price' => 1000,
+                    'quantity' => 1,
+                    'category' => 'beverage',
+                    'shared_by' => [1],
+                ],
+                [
+                    'name' => 'Arrack',
+                    'unit_price' => 1000,
+                    'quantity' => 1,
+                    'category' => 'alcohol',
+                    'shared_by' => [1],
+                ],
+            ],
+            'code' => 'HAPPY20',
+        ]);
+
+        $this->assertSame('200.00', $result['seats'][0]['discount']);
+        $this->assertSame('180.00', $result['bill']['service_charge']);
+        $this->assertSame('536.40', $result['bill']['vat']);
+        $this->assertSame('3516.40', $result['bill']['exact_total']);
+        $this->assertSame(3516, $result['bill']['total']);
+        $this->assertSame(3516, $result['seats'][0]['amount_due']);
+    }
+
+    public function test_a_seat_with_no_items_pays_zero(): void
+    {
+        $result = app(BillSplitService::class)->split([
+            'seats' => [1, 2],
+            'items' => [
+                [
+                    'name' => 'Tea',
+                    'unit_price' => 100,
+                    'quantity' => 1,
+                    'category' => 'beverage',
+                    'shared_by' => [1],
+                ],
+            ],
+        ]);
+
+        $this->assertSame(2, count($result['seats']));
+        $this->assertSame(2, $result['seats'][1]['seat']);
+        $this->assertSame('0.00', $result['seats'][1]['subtotal']);
+        $this->assertSame(0, $result['seats'][1]['amount_due']);
+        $this->assertSame(
+            $result['bill']['total'],
+            $result['seats'][0]['amount_due'] + $result['seats'][1]['amount_due'],
+        );
+    }
+
+    public function test_table500_is_rejected_when_the_subtotal_is_below_5000(): void
     {
         $this->expectException(ValidationException::class);
 
