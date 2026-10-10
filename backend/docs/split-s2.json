@@ -1,0 +1,27 @@
+{
+  "seats": [1, 2, 3],
+  "items": [
+    {
+      "name": "Fried rice",
+      "unit_price": 1200,
+      "quantity": 3,
+      "category": "food",
+      "shared_by": [1, 2, 3]
+    },
+    {
+      "name": "Arrack",
+      "unit_price": 2400,
+      "quantity": 1,
+      "category": "alcohol",
+      "shared_by": [2, 3]
+    },
+    {
+      "name": "Coke",
+      "unit_price": 300,
+      "quantity": 3,
+      "category": "beverage",
+      "shared_by": [1, 2, 3]
+    }
+  ],
+  "code": "TABLE500"
+}

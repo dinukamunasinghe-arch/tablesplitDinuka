@@ -1,0 +1,25 @@
+{
+  "now": 8,
+  "tickets": [
+    {
+      "id": "S1",
+      "table": 1,
+      "created": 0,
+      "prep": 10,
+      "priority": "first"
+    },
+    {
+      "id": "S2",
+      "table": 2,
+      "created": 3,
+      "prep": 4,
+      "priority": "VIP"
+    },
+    {
+      "id": "S3",
+      "table": 1,
+      "created": 5,
+      "prep": 6
+    }
+  ]
+}

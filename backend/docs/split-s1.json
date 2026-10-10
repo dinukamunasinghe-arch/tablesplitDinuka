@@ -1,0 +1,20 @@
+{
+  "seats": [1, 2],
+  "items": [
+    {
+      "name": "Rice & curry",
+      "unit_price": 650,
+      "quantity": 2,
+      "category": "food",
+      "shared_by": [1, 2]
+    },
+    {
+      "name": "Tea",
+      "unit_price": 150,
+      "quantity": 2,
+      "category": "beverage",
+      "shared_by": [1, 2]
+    }
+  ],
+  "code": null
+}
